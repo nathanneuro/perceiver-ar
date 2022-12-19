@@ -449,7 +449,7 @@ def get_sweep(sweep_name, train_device_count, eval_device_count):
             (f"{MODEL_KWARGS}.num_transformers_per_block", 2),
             (f"{MODEL_KWARGS}.z_index_dim", 768),
             (f"{EXP_CONFIG}.evaluation.eval_block_size", 1),
-            # (f"{EXP_CONFIG}.evaluation.max_examples", 0),
+            (f"{EXP_CONFIG}.evaluation.max_examples", 0),
             (f"{MODEL_KWARGS}.position_encoding_type", "absolute"),
             (f"{MODEL_KWARGS}.position_encoding", "sinusoidal"),
             (f"{MODEL_KWARGS}.learnable_position_embeddings", True),

@@ -160,20 +160,20 @@ class WebText(Dataset):
     ):
         self._location = "stas/openwebtext-10k" if size == "small" else "openwebtext"
         self._tokenizer = tokenizer
-        self._max_context_length = -1
+        self._max_context_length = 8192
 
     def load(
         self,
         split: Split,
         is_training: bool,
         include_sos: bool,
-        max_context_length=-1,
         batch_size: int = 2,
     ):
-        self.max_context_length = max_context_length
-        print(f"loading dataset WebText with max context length {max_context_length}")
-        self._tokenizer.model_max_length = max_context_length
-        self._tokenizer.max_model_input_sizes["gpt2"] = max_context_length
+        print(
+            f"loading dataset WebText with max context length {self._max_context_length}"
+        )
+        self._tokenizer.model_max_length = self._max_context_length
+        self._tokenizer.max_model_input_sizes["gpt2"] = self._max_context_length
         if is_training:
             ds = load_dataset(self._location, split="train")
         else:
@@ -182,7 +182,7 @@ class WebText(Dataset):
         def parse_example(ex):
             token_list = self._tokenizer.encode(ex["text"])
             events = tf.convert_to_tensor(
-                token_list[: self.max_context_length], dtype=tf.int32
+                token_list[: self._max_context_length], dtype=tf.int32
             )
             events = tf.reshape(events, [-1])
             events += 2
@@ -533,12 +533,7 @@ def load(
         filter_max_length,
     )
 
-    ds = dataset.load(
-        split=split,
-        is_training=is_training,
-        include_sos=include_sos,
-        max_context_length=max_context_length,
-    )
+    ds = dataset.load(split=split, is_training=is_training, include_sos=include_sos)
 
     options = tf.data.Options()
     options.experimental_threading.private_threadpool_size = 48
