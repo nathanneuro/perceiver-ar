@@ -28,9 +28,8 @@ paper can be trained using only a local CPU.
 
 
 ```
-python perceiver_ar/experiment.py --config=perceiver_ar/experiment.py:random_mirrored_32
-python perceiver_ar/experiment.py --config=perceiver_ar/experiment.py:mnist
-python perceiver_ar/experiment.py --config=perceiver_ar/experiment.py:webtext
+PYTHONPATH=.::$PYTHONPATH python perceiver_ar/experiment.py \
+  --config=perceiver_ar/experiment.py:random_mirrored_32
 ```
 
 By default, checkpoints and events will be saved to `/tmp/perceiver_ar`.
