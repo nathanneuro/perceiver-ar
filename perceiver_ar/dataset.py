@@ -38,11 +38,13 @@ AUTOTUNE = tf.data.experimental.AUTOTUNE
 PAD = "<pad>"
 EOS = "<EOS>"
 SOS = "<SOS>"
-RESERVED_TOKENS = [PAD, EOS, SOS]
+SEP = "<sep>"
+RESERVED_TOKENS = [PAD, EOS, SOS, SEP]
 NUM_RESERVED_TOKENS = len(RESERVED_TOKENS)
 PAD_ID = RESERVED_TOKENS.index(PAD)  # Normally 0
 EOS_ID = RESERVED_TOKENS.index(EOS)  # Normally 1
 SOS_ID = RESERVED_TOKENS.index(SOS)  # Normally 2
+SEP_ID = RESERVED_TOKENS.index(SEP)  # Normally 3
 
 # Seed for seeded-shuffle evaluation.
 SEEDED_SHUFFLE_SEEDS = (42, 17)
@@ -169,32 +171,91 @@ class WebText(Dataset):
         include_sos: bool,
         batch_size: int = 2,
     ):
+        data_save_path = (
+            f'data/{self._location.replace("/","_")}_{self._max_context_length}'
+        )
+        try:
+            ds = tf.data.experimental.load(data_save_path)
+            return ds
+        except Exception as e:
+            print(
+                f"No preprocessed dataset found for WebText with max length = {self._max_context_length}"
+            )
         print(
             f"loading dataset WebText with max context length {self._max_context_length}"
         )
         self._tokenizer.model_max_length = self._max_context_length
         self._tokenizer.max_model_input_sizes["gpt2"] = self._max_context_length
         if is_training:
-            ds = load_dataset(self._location, split="train")
+            dataset = load_dataset(self._location, split="train")
         else:
-            ds = load_dataset(self._location, split="test")
+            dataset = load_dataset(self._location, split="test")
 
-        def parse_example(ex):
-            token_list = self._tokenizer.encode(ex["text"])
-            events = tf.convert_to_tensor(
-                token_list[: self._max_context_length], dtype=tf.int32
-            )
-            events = tf.reshape(events, [-1])
-            events += 2
+        # def parse_example(ex):
+        #     token_list = self._tokenizer.encode(ex["text"])
+        #     events = tf.convert_to_tensor(
+        #         token_list[: self._max_context_length], dtype=tf.int32
+        #     )
+        #     events = tf.reshape(events, [-1])
+        #     events += 2
 
-            if include_sos:
-                events = tf.concat([[0], events], axis=0)
-            events = tf.concat([events, [1]], axis=0)
-            return {"events": events}
+        #     if include_sos:
+        #         events = tf.concat([[0], events], axis=0)
+        #     events = tf.concat([events, [1]], axis=0)
+        #     return {"events": events}
 
-        dataset = ds.map(parse_example)
-        rt = tf.ragged.constant([x["events"] for x in dataset])
-        ds = tf.data.Dataset.from_tensor_slices(rt)
+        # dataset = ds.map(parse_example)
+        # Seems like this codebase doesn't do batch padding later
+        # So I can take a page from PerceiverIO and do dataset padding here.
+        # Note from HuggingFace model card on PerceiverIO:
+        # "The authors concatenate 10 documents before splitting into crops to reduce wasteful computation on padding tokens."
+        # I will concatenate docs up to as many fit in max sequence length, then pad to max sequence length.
+
+        # Here's the code for if the dataset has different data lengths
+        # rt = tf.ragged.constant([x["events"] for x in dataset])
+        # ds = tf.data.Dataset.from_tensor_slices(rt)
+        dataset.shuffle(seed=SEEDED_SHUFFLE_SEEDS[0])
+        dataset = dataset.map(
+            lambda examples: self._tokenizer(examples["text"]), batched=True
+        )
+        running_group = None
+        new_dataset = []
+        for i, row in enumerate(dataset):
+            item = row["input_ids"]
+            if running_group is None:
+                if include_sos:
+                    running_group = [SOS_ID] + item
+                else:
+                    running_group = item
+            if len(item) < self._max_context_length - 1 - len(running_group):
+                running_group += [SEP_ID] + item
+            else:
+                if len(running_group) < self._max_context_length - 1:
+                    running_group += [PAD_ID] * (
+                        self._max_context_length - 1 - len(running_group)
+                    )
+                new_dataset.append(
+                    running_group[: self._max_context_length - 1] + [EOS_ID]
+                )
+                assert (
+                    running_group[: self._max_context_length - 1] + [EOS_ID]
+                ) == self._max_context_length
+                if len(running_group) > self._max_context_length - 1:
+                    if include_sos:
+                        running_group = (
+                            [SOS_ID]
+                            + running_group[self._max_context_length - 1 :]
+                            + [SEP_ID]
+                        )
+                    else:
+                        running_group = running_group[
+                            self._max_context_length - 1 :
+                        ] + [SEP_ID]
+                else:
+                    if include_sos:
+                        running_group = [SOS_ID] + item
+                    else:
+                        running_group = item
 
         def add_event_idxs(ex):
             # Start at 1 to prevent confusion with padding.
@@ -202,8 +263,9 @@ class WebText(Dataset):
             event_idxs = tf.expand_dims(event_idxs, axis=-1)
             return {"events": ex, "event_idxs": event_idxs}
 
+        ds = tf.data.Dataset.from_tensor_slices(new_dataset)
         ds = ds.map(add_event_idxs, num_parallel_calls=AUTOTUNE)
-
+        tf.data.experimental.save(ds, data_save_path)
         return ds
 
     @property

@@ -453,7 +453,7 @@ def get_sweep(sweep_name, train_device_count, eval_device_count):
             (f"{MODEL_KWARGS}.position_encoding_type", "absolute"),
             (f"{MODEL_KWARGS}.position_encoding", "sinusoidal"),
             (f"{MODEL_KWARGS}.learnable_position_embeddings", True),
-            (f"{MODEL_KWARGS}.use_positions_from_data", True),
+            (f"{MODEL_KWARGS}.use_positions_from_data", False),
             ("dataset_loader", "openwebtext-10k"),
             # Switch to cosine for final 50k.
             # hyper.sweep(f'{EXP_CONFIG}.optimizer.schedule_type', ['cosine']),
@@ -643,6 +643,8 @@ class Experiment(experiment.AbstractExperiment):
             self._initialize_train()
 
         inputs = next(self._train_input)
+        if global_step % 10 == 0:
+            print("debug inputs", inputs)
 
         self._params, self._state, self._opt_state, scalars = self._update_func(
             self._params, self._state, self._opt_state, inputs, rng, global_step
@@ -761,8 +763,6 @@ class Experiment(experiment.AbstractExperiment):
             )
         else:
             max_context_length = self.config.data.max_context_length
-            print(f"config max context length = {max_context_length}")
-            print(dataset.__dict__)
             # All configurations need at least a single token to predict.
             minimum_crop_length = 1
 
