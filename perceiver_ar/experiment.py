@@ -436,7 +436,7 @@ def get_sweep(sweep_name, train_device_count, eval_device_count):
         train_batch_sizes = [4]
         train_batch_sizes_per_device = [1]
         eval_batch_size_per_device = 4
-    elif sweep_name == "webtext":
+    elif sweep_name == "webtext" or sweep_name == "webtext-10k":
         # gpt2   12-layer, 768-hidden, 12-heads, 117M parameters.
         sweep_parameters = [
             # ----- Start active sweep ------
@@ -454,7 +454,7 @@ def get_sweep(sweep_name, train_device_count, eval_device_count):
             (f"{MODEL_KWARGS}.position_encoding", "sinusoidal"),
             (f"{MODEL_KWARGS}.learnable_position_embeddings", True),
             (f"{MODEL_KWARGS}.use_positions_from_data", False),
-            ("dataset_loader", "openwebtext-10k"),
+            ("dataset_loader", sweep_name),
             # Switch to cosine for final 50k.
             # hyper.sweep(f'{EXP_CONFIG}.optimizer.schedule_type', ['cosine']),
             (f"{EXP_CONFIG}.optimizer.schedule_type", "constant"),
