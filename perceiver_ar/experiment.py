@@ -1278,7 +1278,7 @@ def restore_state_to_in_memory_checkpointer(restore_path, config):
 
 def _get_step_date_label(global_step):
     # Date removing microseconds.
-    date_str = datetime.datetime.now().isoformat().split(".")[0]
+    date_str = datetime.date.today()  # time.now().isoformat().split(".")[0]
     return f"step_{global_step}_{date_str}"
 
 
