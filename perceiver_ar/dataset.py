@@ -14,7 +14,7 @@
 
 # python3
 """Dataset loaders."""
-
+import os
 import abc
 import enum
 import functools
@@ -29,7 +29,9 @@ from datasets import load_dataset
 from transformers import GPT2TokenizerFast
 
 import numpy as np
+import pandas as pd
 import idx2numpy
+from tqdm import tqdm
 
 
 Batch = Mapping[Text, np.ndarray]
@@ -169,103 +171,261 @@ class WebText(Dataset):
         split: Split,
         is_training: bool,
         include_sos: bool,
-        batch_size: int = 2,
+        batch_size: int = 16,
     ):
         data_save_path = (
             f'data/{self._location.replace("/","_")}_{self._max_context_length}'
         )
-        try:
-            ds = tf.data.experimental.load(data_save_path)
-            return ds
-        except Exception as e:
-            print(
-                f"No preprocessed dataset found for WebText with max length = {self._max_context_length}"
-            )
+        # try:
+        #     ds = tf.data.experimental.load(data_save_path)
+        #     return ds
+        # except Exception as e:
+        #     print(e)
+        #     print(
+        #         f"No preprocessed dataset found for WebText with max length = {self._max_context_length}"
+        #     )
         print(
             f"loading dataset WebText with max context length {self._max_context_length}"
         )
         self._tokenizer.model_max_length = self._max_context_length
         self._tokenizer.max_model_input_sizes["gpt2"] = self._max_context_length
-        if is_training:
-            dataset = load_dataset(self._location, split="train")
-        else:
-            dataset = load_dataset(self._location, split="test")
-
-        # def parse_example(ex):
-        #     token_list = self._tokenizer.encode(ex["text"])
-        #     events = tf.convert_to_tensor(
-        #         token_list[: self._max_context_length], dtype=tf.int32
-        #     )
-        #     events = tf.reshape(events, [-1])
-        #     events += 2
-
-        #     if include_sos:
-        #         events = tf.concat([[0], events], axis=0)
-        #     events = tf.concat([events, [1]], axis=0)
-        #     return {"events": events}
-
-        # dataset = ds.map(parse_example)
-        # Seems like this codebase doesn't do batch padding later
-        # So I can take a page from PerceiverIO and do dataset padding here.
-        # Note from HuggingFace model card on PerceiverIO:
-        # "The authors concatenate 10 documents before splitting into crops to reduce wasteful computation on padding tokens."
-        # I will concatenate docs up to as many fit in max sequence length, then pad to max sequence length.
-
-        # Here's the code for if the dataset has different data lengths
-        # rt = tf.ragged.constant([x["events"] for x in dataset])
-        # ds = tf.data.Dataset.from_tensor_slices(rt)
-        dataset.shuffle(seed=SEEDED_SHUFFLE_SEEDS[0])
-        dataset = dataset.map(
-            lambda examples: self._tokenizer(examples["text"]), batched=True
-        )
-        running_group = None
-        new_dataset = []
-        for i, row in enumerate(dataset):
-            item = row["input_ids"]
-            if running_group is None:
-                if include_sos:
-                    running_group = [SOS_ID] + item
-                else:
-                    running_group = item
-            if len(item) < self._max_context_length - 1 - len(running_group):
-                running_group += [SEP_ID] + item
-            else:
-                if len(running_group) < self._max_context_length - 1:
-                    running_group += [PAD_ID] * (
-                        self._max_context_length - 1 - len(running_group)
-                    )
-                new_dataset.append(
-                    running_group[: self._max_context_length - 1] + [EOS_ID]
+        dataset = None
+        if False:  # not os.path.isfile("data/raw_data.csv"):
+            if is_training:
+                dataset = load_dataset(
+                    self._location, split="train", cache_dir="../huggingface"
                 )
-                assert (
-                    running_group[: self._max_context_length - 1] + [EOS_ID]
-                ) == self._max_context_length
-                if len(running_group) > self._max_context_length - 1:
-                    if include_sos:
-                        running_group = (
-                            [SOS_ID]
-                            + running_group[self._max_context_length - 1 :]
-                            + [SEP_ID]
-                        )
+            else:
+                dataset = load_dataset(
+                    self._location, split="test", cache_dir="../huggingface"
+                )
+
+            # def parse_example(ex):
+            #     token_list = self._tokenizer.encode(ex["text"])
+            #     events = tf.convert_to_tensor(
+            #         token_list[: self._max_context_length], dtype=tf.int32
+            #     )
+            #     events = tf.reshape(events, [-1])
+            #     events += 2
+
+            #     if include_sos:
+            #         events = tf.concat([[0], events], axis=0)
+            #     events = tf.concat([events, [1]], axis=0)
+            #     return {"events": events}
+
+            # dataset = ds.map(parse_example)
+            # Seems like this codebase doesn't do batch padding later
+            # So I can take a page from PerceiverIO and do dataset padding here.
+            # Note from HuggingFace model card on PerceiverIO:
+            # "The authors concatenate 10 documents before splitting into crops to reduce wasteful computation on padding tokens."
+            # I will concatenate docs up to as many fit in max sequence length, then pad to max sequence length.
+
+            # Here's the code for if the dataset has different data lengths
+            # rt = tf.ragged.constant([x["events"] for x in dataset])
+            # ds = tf.data.Dataset.from_tensor_slices(rt)
+            dataset.shuffle(seed=SEEDED_SHUFFLE_SEEDS[0])
+            dataset = dataset.map(
+                lambda examples: self._tokenizer(examples["text"]), batched=True
+            )
+            running_group = None
+
+            # with open("data/raw_data.csv", "w") as f:
+
+            # Write the records to a file.
+            with tf.io.TFRecordWriter(f"data/custom_records.tfrecords") as file_writer:
+
+                for row in tqdm(dataset):
+                    item = row["input_ids"]
+                    if running_group is None:
+                        if include_sos:
+                            running_group = [SOS_ID] + item
+                        else:
+                            running_group = item
+                    if len(item) < self._max_context_length - 1 - len(running_group):
+                        running_group += [SEP_ID] + item
                     else:
-                        running_group = running_group[
-                            self._max_context_length - 1 :
-                        ] + [SEP_ID]
-                else:
-                    if include_sos:
-                        running_group = [SOS_ID] + item
-                    else:
-                        running_group = item
+                        if len(running_group) < self._max_context_length - 1:
+                            running_group += [PAD_ID] * (
+                                self._max_context_length - 1 - len(running_group)
+                            )
+                        output = running_group[: self._max_context_length - 1] + [
+                            EOS_ID
+                        ]
+                        record_bytes = tf.train.Example(
+                            features=tf.train.Features(
+                                feature={
+                                    "x": tf.train.Feature(
+                                        int64_list=tf.train.Int64List(value=output)
+                                    )
+                                }
+                            )
+                        ).SerializeToString()
+                        file_writer.write(record_bytes)
+                        # f.write(
+                        #     str(
+                        #         running_group[: self._max_context_length - 1]
+                        #         + [EOS_ID]
+                        #     )
+                        #     + "\n"
+                        # )
+                        # assert (
+                        #     running_group[: self._max_context_length - 1] + [EOS_ID]
+                        # ) == self._max_context_length
+                        if len(running_group) > self._max_context_length - 1:
+                            if include_sos:
+                                running_group = (
+                                    [SOS_ID]
+                                    + running_group[self._max_context_length - 1 :]
+                                    + [SEP_ID]
+                                )
+                            else:
+                                running_group = running_group[
+                                    self._max_context_length - 1 :
+                                ] + [SEP_ID]
+                        else:
+                            if include_sos:
+                                running_group = [SOS_ID] + item
+                            else:
+                                running_group = item
+        del dataset
 
         def add_event_idxs(ex):
             # Start at 1 to prevent confusion with padding.
-            event_idxs = tf.range(tf.shape(ex)[0]) + 1
+            # with sess.as_default():
+            #     parsed_example = [int(x) for x in ex["events"].eval()[0].split(",")]
+            # parsed_tensor = tf.convert_to_tensor(parsed_example, dtype=tf.int32)
+            event_idxs = tf.range(1, 8193, dtype=tf.int32)
+            # try:
+            #     event_idxs = tf.range(tf.shape(ex)) + 1
+            # except:
+            #     print("ex.shape", tf.shape(ex), ex)
             event_idxs = tf.expand_dims(event_idxs, axis=-1)
+            ex = tf.cast(ex["x"], tf.int32)
             return {"events": ex, "event_idxs": event_idxs}
 
-        ds = tf.data.Dataset.from_tensor_slices(new_dataset)
+        # Read the data back out.
+        def decode_fn(record_bytes):
+            return tf.io.parse_single_example(
+                # Data
+                record_bytes,
+                # Schema
+                {
+                    "x": tf.io.FixedLenFeature(
+                        [
+                            8192,
+                        ],
+                        dtype=tf.int64,
+                    )
+                },
+            )
+
+        # line_lengths = []
+        # with open("data/raw_data.csv", "r") as infile:
+        #     for line in infile:
+        #         line_len = len(line.split(","))
+        #         if line_len not in line_lengths:
+        #             line_lengths.append(line_len)
+        #         if line_len != 8192:
+        #             print(line[-10:])
+
+        # print("line lengths", line_lengths)
+
+        # with open("data/raw_data2.csv", "w") as outf:
+        #     with open("data/raw_data.csv", "r") as infile:
+        #         for line in infile:
+        #             print(line)
+        #             # parsed_line = [int(x) for x in line.split(",")]
+        #             # outf.write(str(parsed_line) + "\n")
+        #             break
+
+        # Create a TextLineDataset for the file
+        # dataset = tf.data.TextLineDataset("data/raw_data.csv")
+
+        # Map the dataset elements (strings) to lists of integers
+        # def process_text_line(ex):
+        #     # ex = tf.nest.flatten(ex)
+        #     # string_length = tf.strings.length(ex)[0] - 2
+        #     # print(string_length)
+        #     # ex = tf.strings.substr(ex, 1, string_length)
+        #     ex = tf.strings.regex_replace(
+        #         ex, pattern=r"[\[\]]", rewrite="", replace_global=True
+        #     )
+        #     ex = tf.strings.split(
+        #         ex, sep=","
+        #     )  # now it's a ragged tensor of strings. blech.
+        #     # print(type(ex), ex)
+        #     # <class 'tensorflow.python.framework.ops.Tensor'> Tensor("StringSplit/RaggedGetItem/strided_slice_5:0", shape=(None,), dtype=string)
+        #     ex = tf.strings.to_number(
+        #         ex,
+        #         out_type=tf.dtypes.int32,
+        #     )  # now a ragged tensor of ints. better, but still ragged.
+        #     # or is it just a tensor???
+        #     # ex = tf.Tensor(ex.to_list(), dtype=tf.dtypes.int32)  # will this fix it?
+        #     # print("type ex", type(ex))
+        #     print(ex, type(ex), ex.shape)
+
+        #     try:
+        #         event_idxs = tf.range(1, 8193)  # tf.range(ex.shape[0]) + 1
+        #     except Exception as e:
+        #         print("\n\nargghh\n\n")
+        #         print(e)
+        #         print("ex.shape", tf.shape(ex), ex)
+        #     event_idxs = tf.expand_dims(event_idxs, axis=-1)
+        #     print(ex.shape, event_idxs.shape)
+
+        #     # h_dims=[1, 4, 1], max_context_length=8193, filter_min_length=None, filter_max_length=None
+        #     # loading dataset WebText with max context length 8192
+        #     # Tensor("Shape:0", shape=(1,), dtype=int32) Tensor("Shape_1:0", shape=(2,), dtype=int32)
+        #     assert False
+        #     return {"events": ex, "event_idxs": event_idxs}
+
+        # dataset = dataset.map(
+        #     lambda x: tf.strings.to_number(
+        #         tf.strings.split(
+        #             tf.strings.substr(x, 1, tf.strings.length(x) - 2), sep=","
+        #         ),
+        #         out_type=tf.dtypes.int32,
+        #     )
+        # )
+
+        # Shuffle and batch the dataset
+        # dataset = dataset.shuffle(buffer_size=1024).batch(2)
+
+        # Iterate over the dataset
+        # for element in dataset:
+        #     print(element)
+        #     break
+        # ds = tf.data.experimental.make_csv_dataset(
+        #     "data/raw_data2.csv",
+        #     column_names=["events"],
+        #     field_delim="|",
+        #     batch_size=batch_size,
+        #     num_epochs=1,
+        # )
+        # dataset = pd.read_csv(
+        #     "data/raw_data.csv",
+        #     sep="|",
+        #     header=None,
+        #     index_col=None,
+        #     names=["events"],
+        # )
+        # print("data loaded pandas style")
+        # dataset["events"].apply(
+        #     lambda ex: [int(x) for x in ex["events"].split(",")], inplace=True
+        # )
+        # ds = tf.data.Dataset.from_tensor_slices(dataset.to_dict(orient="list"))
+        ds = tf.data.TFRecordDataset(["data/custom_records.tfrecords"]).apply(
+            tf.data.experimental.ignore_errors()
+        )
+        print("data loaded")
+        ds = ds.map(decode_fn)
+        for raw_record in ds.take(3):
+            print(repr(raw_record))
+        print("type ds", type(ds), ds)
         ds = ds.map(add_event_idxs, num_parallel_calls=AUTOTUNE)
-        tf.data.experimental.save(ds, data_save_path)
+        # dataset = dataset.map(process_text_line)  # , num_parallel_calls=AUTOTUNE)
+        # tf.data.experimental.save(ds, data_save_path)
+        print(f"data loaded!")
         return ds
 
     @property
@@ -422,7 +582,11 @@ class DummyDataset(Dataset):
             # Start at 1 to prevent confusion with padding.
             event_idxs = tf.range(tf.shape(events)[0]) + 1
             event_idxs = tf.expand_dims(event_idxs, axis=-1)
-
+            # print(tf.shape(events), tf.shape(event_idxs))
+            #  batch_dims=[1, 8, 1], max_context_length=17, filter_min_length=None, filter_max_length=None
+            # Tensor("Shape_1:0", shape=(1,), dtype=int32) Tensor("Shape_2:0", shape=(2,), dtype=int32)
+            # print(events.shape, event_idxs.shape)
+            # (12,) (12, 1)
             return {"events": events, "event_idxs": event_idxs}
 
         ds = tf.data.Dataset.from_tensor_slices(features)

@@ -193,7 +193,7 @@ def get_config(arg_string):
     )
 
     # Training loop config.
-    config.training_steps = int(1e5)  # 1e6
+    config.training_steps = int(1e7)  # 1e6
     config.log_train_data_interval = 60
     config.log_tensors_interval = 60
     config.save_checkpoint_interval = 10  # just for in-memory checkpointing.
@@ -222,7 +222,6 @@ def _get_batch_sweep(
 
     def _batch(batch_size, batch_size_per_device):
         per_device_batch, remainder = divmod(batch_size, train_device_count)
-        assert remainder == 0
         assert per_device_batch >= 1
         num_microbatches, remainder = divmod(per_device_batch, batch_size_per_device)
         if remainder != 0:
@@ -442,7 +441,7 @@ def get_sweep(sweep_name, train_device_count, eval_device_count):
             # ----- Start active sweep ------
             ("max_context_length", 8192),
             (f"{MODEL_KWARGS}.max_wavelength", 8192),
-            (f"{EXP_CONFIG}.data.minimum_crop_length", 8189),
+            (f"{EXP_CONFIG}.data.minimum_crop_length", 4),
             (f"{MODEL_KWARGS}.input_embed_dim", 768),
             (f"{MODEL_KWARGS}.num_cross_attend_heads", 12),
             (f"{MODEL_KWARGS}.fraction_to_rotate", 0.5),
