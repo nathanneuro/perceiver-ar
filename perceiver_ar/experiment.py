@@ -72,8 +72,8 @@ def get_config(arg_string):
     # Experiment config.
     config.train_batch_size = 2
     config.train_batch_size_per_device = 2
-    config.dataset_loader = "random_mirrored_32"
-    config.max_context_length = 1024
+    config.dataset_loader = None  # you could set a default like "random_mirrored_32"
+    config.max_context_length = 0  # you could set a default like 1024
     config.num_targets = 1024
     config.num_microbatches = 1
     config.checkpoint_dir = f"./checkpoints/{sweep}_{datetime.date.today()}"
@@ -196,10 +196,28 @@ def get_config(arg_string):
     config.training_steps = int(1e7)  # 1e6
     config.log_train_data_interval = 60
     config.log_tensors_interval = 60
-    config.save_checkpoint_interval = 10  # just for in-memory checkpointing.
+    config.save_checkpoint_interval = (
+        10  # in-memory checkpointing. Uses jaxline https://github.com/deepmind/jaxline
+    )
+    # for file saving, add additional utils.PeriodicAction based on wall clock time
+    config.save_checkpoint_file_minutes_interval = 30
     config.checkpoint_interval_type = "steps"
     config.eval_specific_checkpoint_dir = ""
     config.best_model_eval_metric = "eval_accuracy"
+    periodic_actions = [
+            (
+                utils.PeriodicAction(
+                    fn=signal.raise_signal(signal.SIGUSR1),
+                    interval_type="secs",  # config.logging_interval_type or config.interval_type,
+                    interval=int(config.save_checkpoint_file_minutes_interval * 60),
+                ),
+            )
+        ]
+    
+    if config.periodic_actions is None:
+        config.periodic_actions = periodic_actions
+    else:
+        config.periodic_actions += periodic_actions
 
     # Prevents accidentally setting keys that aren't recognized (e.g. in tests).
     config.lock()
@@ -1312,14 +1330,14 @@ def _save_state_from_in_memory_checkpointer(
 
 def _setup_signals(save_model_fn):
     """Sets up a signal for model saving."""
-    # Save a model on Ctrl+C.
-    def sigint_handler(unused_sig, unused_frame):
+
+    def sig_custom1_handler(unused_sig, unused_frame):
         # Ideally, rather than saving immediately, we would then "wait" for a good
         # time to save. In practice this reads from an in-memory checkpoint that
         # only saves every 30 seconds or so, so chances of race conditions are very
         # small.
         save_model_fn()
-        logging.info(r"Use `Ctrl+\` to save and exit.")
+        logging.info(r"SIGUSR1 (Custom User Signal 1) received. Checkpoint file saved.")
 
     # Exit on `Ctrl+\`, saving a model.
     prev_sigquit_handler = signal.getsignal(signal.SIGQUIT)
@@ -1328,13 +1346,15 @@ def _setup_signals(save_model_fn):
         # Restore previous handler early, just in case something goes wrong in the
         # next lines, so it is possible to press again and exit.
         signal.signal(signal.SIGQUIT, prev_sigquit_handler)
+        logging.info(r"Save and exit `Ctrl+\` or `Ctrl+c` signal received.")
         save_model_fn()
-        logging.info(r"Exiting on `Ctrl+\`")
+        logging.info(r"Checkpoint saved. Exiting on `Ctrl+\` or `Ctrl+c`")
 
         # Re-raise for clean exit.
         os.kill(os.getpid(), signal.SIGQUIT)
 
-    signal.signal(signal.SIGINT, sigint_handler)
+    signal.signal(signal.SIGUSR1, sig_custom1_handler)
+    signal.signal(signal.SIGINT, sigquit_handler)
     signal.signal(signal.SIGQUIT, sigquit_handler)
 
 
