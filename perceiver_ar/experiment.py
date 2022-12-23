@@ -21,7 +21,7 @@ import os
 import signal
 import threading
 import time
-from typing import Mapping, Optional, Text, Tuple
+from typing import Mapping, Optional, Text, Tuple, List
 
 from absl import app
 from absl import flags
@@ -51,6 +51,56 @@ OptState = Tuple[optax.TraceState, optax.ScaleByScheduleState, optax.ScaleState]
 Scalars = Mapping[Text, jnp.ndarray]
 
 
+def dummy_save():
+    """a do-nothing stub for responding to save signal
+    when we shouldn't actually be saving."""
+    print("dummy save!")
+    pass
+
+
+def setup_signals(save_model_fn):
+    """Sets up a signal for model saving."""
+    global global_save_model_fn
+    global_save_model_fn = save_model_fn
+
+    def sig_custom1_handler(unused_sig, unused_frame):
+        # Ideally, rather than saving immediately, we would then "wait" for a good
+        # time to save. In practice this reads from an in-memory checkpoint that
+        # only saves every 30 seconds or so, so chances of race conditions are very
+        # small.
+        global global_save_model_fn
+        global_save_model_fn()
+        if global_save_model_fn == dummy_save:
+            logging.info(r"Dummy save called")
+        else:
+            logging.info(
+                r"SIGUSR1 (Custom User Signal 1) received. Checkpoint file saved."
+            )
+
+    # Exit on `Ctrl+\`, saving a model.
+    prev_sigquit_handler = signal.getsignal(signal.SIGQUIT)
+
+    def sigquit_handler(unused_sig, unused_frame):
+        # Restore previous handler early, just in case something goes wrong in the
+        # next lines, so it is possible to press again and exit.
+        global global_save_model_fn
+        signal.signal(signal.SIGQUIT, prev_sigquit_handler)
+
+        logging.info(r"Save and exit `Ctrl+\` or `Ctrl+c` signal received.")
+        global_save_model_fn()
+        if global_save_model_fn == dummy_save:
+            logging.info(r"Dummy save called")
+        else:
+            logging.info(r"Checkpoint saved. Exiting on `Ctrl+\` or `Ctrl+c`")
+
+        # Re-raise for clean exit.
+        os.kill(os.getpid(), signal.SIGQUIT)
+
+    signal.signal(signal.SIGUSR1, sig_custom1_handler)
+    signal.signal(signal.SIGINT, sigquit_handler)
+    signal.signal(signal.SIGQUIT, sigquit_handler)
+
+
 def events_to_shifted_inputs_and_targets(events):
     """Return model inputs and model targets from an event sequence."""
     # events = [a, b, c, d, 0]
@@ -72,13 +122,34 @@ def get_config(arg_string):
     # Experiment config.
     config.train_batch_size = 2
     config.train_batch_size_per_device = 2
-    config.dataset_loader = None  # you could set a default like "random_mirrored_32"
-    config.max_context_length = 0  # you could set a default like 1024
+    config.dataset_loader = "random_mirrored_32"
+    config.max_context_length = 1024
     config.num_targets = 1024
     config.num_microbatches = 1
     config.checkpoint_dir = f"./checkpoints/{sweep}_{datetime.date.today()}"
     config.train_checkpoint_all_hosts = False
     config.restore_path = ""
+    config.save_checkpoint_interval = (
+        10  # in-memory checkpointing. Uses jaxline https://github.com/deepmind/jaxline
+    )
+    # for file saving, add additional utils.PeriodicAction based on wall clock time
+    config.save_checkpoint_file_minutes_interval = 30
+    config.checkpoint_interval_type = "steps"
+    config.eval_specific_checkpoint_dir = ""
+
+    def _send_custom_user_signal_1(step, scalar_values):
+        """Jaxline periodic function must accept args: step, scalar values
+        not used in this case"""
+        signal.raise_signal(signal.SIGUSR1)
+
+    print("defining a periodic action")
+    extra_periodic_actions = (
+        utils.PeriodicAction(
+            fn=_send_custom_user_signal_1,
+            interval_type="secs",  # config.logging_interval_type or config.interval_type,
+            interval=int(config.save_checkpoint_file_minutes_interval * 60),
+        ),
+    )  # in its typing it says List, but that's a lie. Its a Tuple.
 
     config.experiment_kwargs = config_dict.ConfigDict(
         dict(
@@ -165,6 +236,7 @@ def get_config(arg_string):
                         "train_batch_size_per_device"
                     ),
                     num_microbatches=config.get_oneway_ref("num_microbatches"),
+                    extra_periodic_actions=extra_periodic_actions,
                 ),
                 loss=dict(
                     z_loss=1e-4,
@@ -196,32 +268,10 @@ def get_config(arg_string):
     config.training_steps = int(1e7)  # 1e6
     config.log_train_data_interval = 60
     config.log_tensors_interval = 60
-    config.save_checkpoint_interval = (
-        10  # in-memory checkpointing. Uses jaxline https://github.com/deepmind/jaxline
-    )
-    # for file saving, add additional utils.PeriodicAction based on wall clock time
-    config.save_checkpoint_file_minutes_interval = 30
-    config.checkpoint_interval_type = "steps"
-    config.eval_specific_checkpoint_dir = ""
     config.best_model_eval_metric = "eval_accuracy"
-    periodic_actions = [
-            (
-                utils.PeriodicAction(
-                    fn=signal.raise_signal(signal.SIGUSR1),
-                    interval_type="secs",  # config.logging_interval_type or config.interval_type,
-                    interval=int(config.save_checkpoint_file_minutes_interval * 60),
-                ),
-            )
-        ]
-    
-    if config.periodic_actions is None:
-        config.periodic_actions = periodic_actions
-    else:
-        config.periodic_actions += periodic_actions
 
     # Prevents accidentally setting keys that aren't recognized (e.g. in tests).
     config.lock()
-
     return config
 
 
@@ -509,7 +559,7 @@ def get_sweep(sweep_name, train_device_count, eval_device_count):
 
 
 class Experiment(experiment.AbstractExperiment):
-    """Music sequence experiment."""
+    """Base experiment for all experiment types."""
 
     # A map from object properties that will be checkpointed to their name
     # in a checkpoint. Currently we assume that these are all sharded
@@ -528,6 +578,7 @@ class Experiment(experiment.AbstractExperiment):
         self.mode = mode
         self.init_rng = init_rng
         self.config = config
+        print("self.config", config)
 
         self._dataset = dataset.DATASET_LOADERS[self.config.data.dataset_loader]
 
@@ -652,6 +703,70 @@ class Experiment(experiment.AbstractExperiment):
     # | |_| | | (_| | | | | |
     #  \__|_|  \__,_|_|_| |_|
     #
+
+    def train_loop(
+        self,
+        config: config_dict.ConfigDict,
+        state,
+        periodic_actions: List[utils.PeriodicAction],
+        writer: Optional[utils.Writer] = None,
+    ) -> None:
+        """Default training loop implementation.
+        Can be overridden for advanced use cases that need a different training loop
+        logic, e.g. on device training loop with jax.lax.while_loop or to add custom
+        periodic actions.
+        Args:
+          config: The config of the experiment that is being run.
+          state: Checkpointed state of the experiment.
+          periodic_actions: List of actions that should be called after every
+            training step, for checkpointing and logging.
+          writer: An optional writer to pass to the experiment step function.
+        """
+        periodic_actions += self.config.training.extra_periodic_actions
+
+        @functools.partial(jax.pmap, axis_name="i")
+        def next_device_state(
+            global_step: jnp.ndarray,
+            rng: jnp.ndarray,
+            host_id: Optional[jnp.ndarray],
+        ):
+            """Updates device global step and rng in one pmap fn to reduce overhead."""
+            global_step += 1
+            step_rng, state_rng = tuple(jax.random.split(rng))
+            step_rng = utils.specialize_rng_host_device(
+                step_rng, host_id, axis_name="i", mode=config.random_mode_train
+            )
+            return global_step, (step_rng, state_rng)
+
+        global_step_devices = np.broadcast_to(
+            state.global_step, [jax.local_device_count()]
+        )
+        host_id_devices = utils.host_id_devices_for_rng(config.random_mode_train)
+        step_key = state.train_step_rng
+
+        with utils.log_activity("training loop"):
+            while self.should_run_step(state.global_step, config):
+                with jax.profiler.StepTraceAnnotation(
+                    "train", step_num=state.global_step
+                ):
+                    scalar_outputs = self.step(
+                        global_step=global_step_devices, rng=step_key, writer=writer
+                    )
+
+                    t = time.time()
+                    # Update state's (scalar) global step (for checkpointing).
+                    # global_step_devices will be back in sync with this after the call
+                    # to next_device_state below.
+                    state.global_step += 1
+                    global_step_devices, (
+                        step_key,
+                        state.train_step_rng,
+                    ) = next_device_state(
+                        global_step_devices, state.train_step_rng, host_id_devices
+                    )
+
+                for action in periodic_actions:
+                    action(t, state.global_step, scalar_outputs)
 
     def step(self, global_step: int, rng: jnp.ndarray, *unused_args, **unused_kwargs):
         """See base class."""
@@ -1328,36 +1443,6 @@ def _save_state_from_in_memory_checkpointer(
         logging.info('Saved "%s" checkpoint to %s', checkpoint_name, python_state_path)
 
 
-def _setup_signals(save_model_fn):
-    """Sets up a signal for model saving."""
-
-    def sig_custom1_handler(unused_sig, unused_frame):
-        # Ideally, rather than saving immediately, we would then "wait" for a good
-        # time to save. In practice this reads from an in-memory checkpoint that
-        # only saves every 30 seconds or so, so chances of race conditions are very
-        # small.
-        save_model_fn()
-        logging.info(r"SIGUSR1 (Custom User Signal 1) received. Checkpoint file saved.")
-
-    # Exit on `Ctrl+\`, saving a model.
-    prev_sigquit_handler = signal.getsignal(signal.SIGQUIT)
-
-    def sigquit_handler(unused_sig, unused_frame):
-        # Restore previous handler early, just in case something goes wrong in the
-        # next lines, so it is possible to press again and exit.
-        signal.signal(signal.SIGQUIT, prev_sigquit_handler)
-        logging.info(r"Save and exit `Ctrl+\` or `Ctrl+c` signal received.")
-        save_model_fn()
-        logging.info(r"Checkpoint saved. Exiting on `Ctrl+\` or `Ctrl+c`")
-
-        # Re-raise for clean exit.
-        os.kill(os.getpid(), signal.SIGQUIT)
-
-    signal.signal(signal.SIGUSR1, sig_custom1_handler)
-    signal.signal(signal.SIGINT, sigquit_handler)
-    signal.signal(signal.SIGQUIT, sigquit_handler)
-
-
 def main(argv, experiment_class: experiment.AbstractExperiment):
 
     # Maybe restore a model.
@@ -1368,12 +1453,14 @@ def main(argv, experiment_class: experiment.AbstractExperiment):
     # Maybe save a model.
     save_dir = os.path.join(FLAGS.config.checkpoint_dir, "models")
     if FLAGS.config.one_off_evaluate:
-        save_model_fn = lambda: None  # No need to save checkpoint in this case.
+        save_model_fn = dummy_save  # No need to save checkpoint in this case.
     else:
         save_model_fn = functools.partial(
             _save_state_from_in_memory_checkpointer, save_dir, experiment_class
         )
-    _setup_signals(save_model_fn)  # Save on Ctrl+C (continue) or Ctrl+\ (exit).
+    setup_signals(
+        save_model_fn
+    )  # Save on Custom User Signal 1 (SIGUSER1). Save and exit on Ctrl+C or Ctrl+\.
 
     try:
         platform.main(experiment_class, argv)
@@ -1382,5 +1469,7 @@ def main(argv, experiment_class: experiment.AbstractExperiment):
 
 
 if __name__ == "__main__":
+    save_model_fn = dummy_save
+    setup_signals(save_model_fn)
     flags.mark_flag_as_required("config")
     app.run(lambda argv: main(argv, Experiment))
