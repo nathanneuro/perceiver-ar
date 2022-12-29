@@ -22,6 +22,7 @@ import signal
 import threading
 import time
 from typing import Mapping, Optional, Text, Tuple, List
+from pprint import pprint
 
 from absl import app
 from absl import flags
@@ -42,8 +43,9 @@ import optax
 from perceiver_ar import perceiver_ar_model
 import tensorflow as tf
 
+# Nathan: is this needed? why?
 # Ensure TensorFlow doesn't use GPU.
-tf.config.set_visible_devices([], "GPU")
+# tf.config.set_visible_devices([], "GPU")
 
 FLAGS = flags.FLAGS
 
@@ -126,7 +128,7 @@ def get_config(arg_string):
     config.max_context_length = 1024
     config.num_targets = 1024
     config.num_microbatches = 1
-    config.checkpoint_dir = f"./checkpoints/{sweep}_{datetime.date.today()}"
+    config.checkpoint_dir = f"{os.environ.get('MODEL_PATH','.')}/checkpoints/{sweep}_{datetime.date.today()}"
     config.train_checkpoint_all_hosts = False
     config.restore_path = ""
     config.save_checkpoint_interval = (
@@ -578,7 +580,8 @@ class Experiment(experiment.AbstractExperiment):
         self.mode = mode
         self.init_rng = init_rng
         self.config = config
-        print("self.config", config)
+        print("self.config")
+        pprint(config, depth=10, width=100)
 
         self._dataset = dataset.DATASET_LOADERS[self.config.data.dataset_loader]
 
@@ -1424,26 +1427,45 @@ def _save_state_from_in_memory_checkpointer(
         if not checkpoint.history:
             logging.info('Nothing to save in "%s"', checkpoint_name)
             continue
+        for attempt in [-1, -2]:
+            try:
+                pickle_nest = checkpoint.history[attempt].pickle_nest
+                global_step = pickle_nest["global_step"]
 
-        pickle_nest = checkpoint.history[-1].pickle_nest
-        global_step = pickle_nest["global_step"]
-
-        state_dict = {"global_step": global_step}
-        for attribute, key in experiment_class.CHECKPOINT_ATTRS.items():
-            state_dict[key] = utils.get_first(
-                getattr(pickle_nest["experiment_module"], attribute)
-            )
-        save_dir = os.path.join(
-            save_path, checkpoint_name, _get_step_date_label(global_step)
-        )
-        python_state_path = os.path.join(save_dir, "checkpoint.dill")
-        os.makedirs(save_dir, exist_ok=True)
-        with open(python_state_path, "wb") as f:
-            dill.dump(state_dict, f)
-        logging.info('Saved "%s" checkpoint to %s', checkpoint_name, python_state_path)
+                state_dict = {"global_step": global_step}
+                for attribute, key in experiment_class.CHECKPOINT_ATTRS.items():
+                    state_dict[key] = utils.get_first(
+                        getattr(pickle_nest["experiment_module"], attribute)
+                    )
+                save_dir = os.path.join(
+                    save_path, checkpoint_name, _get_step_date_label(global_step)
+                )
+                python_state_path = os.path.join(save_dir, "checkpoint.dill")
+                os.makedirs(save_dir, exist_ok=True)
+                with open(python_state_path, "wb") as f:
+                    dill.dump(state_dict, f)
+                logging.info(
+                    'Saved "%s" checkpoint to %s', checkpoint_name, python_state_path
+                )
+                break
+            except Exception as e:
+                print(e)
+                continue
 
 
 def main(argv, experiment_class: experiment.AbstractExperiment):
+    print("flags.config", FLAGS.config)
+    print("this is argv", argv, "\n\n" + "*" * 20)
+    # test if we are successfully using TPU or GPU
+    if jax.default_backend() in ["tpu", "gpu"] or jax.devices()[0].platform in [
+        "tpu",
+        "gpu",
+    ]:
+        print("Successfully using accelerator.")
+    else:
+        import sys
+
+        sys.exit(1)
 
     # Maybe restore a model.
     restore_path = FLAGS.config.get("restore_path", None)
@@ -1472,4 +1494,5 @@ if __name__ == "__main__":
     save_model_fn = dummy_save
     setup_signals(save_model_fn)
     flags.mark_flag_as_required("config")
+
     app.run(lambda argv: main(argv, Experiment))

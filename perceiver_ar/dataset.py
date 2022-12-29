@@ -414,18 +414,28 @@ class WebText(Dataset):
         #     lambda ex: [int(x) for x in ex["events"].split(",")], inplace=True
         # )
         # ds = tf.data.Dataset.from_tensor_slices(dataset.to_dict(orient="list"))
-        ds = tf.data.TFRecordDataset(["data/custom_records.tfrecords"]).apply(
+        print("Loading data from env variable DATA_PATH =", os.environ.get("DATA_PATH"))
+        ds = tf.data.TFRecordDataset([os.environ.get("DATA_PATH")]).apply(
             tf.data.experimental.ignore_errors()
         )
-        print("data loaded")
         ds = ds.map(decode_fn)
         for raw_record in ds.take(3):
             print(repr(raw_record))
         print("type ds", type(ds), ds)
         ds = ds.map(add_event_idxs, num_parallel_calls=AUTOTUNE)
+        # goes way faster with autotune. does it cause issues with counting size?
+        
         # dataset = dataset.map(process_text_line)  # , num_parallel_calls=AUTOTUNE)
         # tf.data.experimental.save(ds, data_save_path)
-        print(f"data loaded!")
+        print(f"data loaded!", ds)  # , ds.cardinality().numpy())
+        # Count
+        # n = 0
+        # take_n = 10000
+        # for samples in ds.batch(take_n):
+        #     n += take_n
+        # print("dataset length ", n)
+        print(sum([1 for _ in ds]))
+        # return ds.batch(batch_size)
         return ds
 
     @property
